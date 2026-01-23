@@ -1,0 +1,12 @@
+/.idea
+*.pyc
+/system/mappings
+/system/exec
+/system/pyj
+system/version.txt
+system/lib/minescript_runtime.py
+system/lib/minescript_plus.py
+system/lib/lib_nbt.py
+system/lib/java.py
+system/lib/minescript.py
+config.txt
