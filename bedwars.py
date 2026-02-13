@@ -7,7 +7,7 @@ from threading import Thread
 import minescript as m
 import minescript_plus
 from bridge import eagle_bridge, breezly_bridge, moon_bridge, setup_crosshair
-from camera import look_at
+from camera import look_at, look
 from minescript_plus import Keybind, Inventory
 from minescript_plus_plus import find_items_containing, count_total_containing, get_relative_region, get_relative_coords, place_block
 import pathfinding
@@ -20,20 +20,24 @@ IRON_TIER = 3
 DIAMOND_TIER = 4
 
 item_prices = {
-    "wool": {"iron_ingot": 4, "gold_ingot": 0, "emerald": 0},
+    "wool": {"iron_ingot": 4, "gold_ingot": 0, "emerald": 0, "quantity": 16},
     "stone_sword": {"iron_ingot": 10, "gold_ingot": 0, "emerald": 0},
     "iron_sword": {"iron_ingot": 0, "gold_ingot": 7, "emerald": 0},
     "diamond_sword": {"iron_ingot": 0, "gold_ingot": 0, "emerald": 4},
-    "end_stone": {"iron_ingot": 24, "gold_ingot": 0, "emerald": 0},
+    "end_stone": {"iron_ingot": 24, "gold_ingot": 0, "emerald": 0, "quantity": 24},
     "golden_apple": {"iron_ingot": 0, "gold_ingot": 3, "emerald": 0},
     "fireball": {"iron_ingot": 40, "gold_ingot": 0, "emerald": 0},
-    "chainmail_boots": {"iron_ingot": 40, "gold_ingot": 0, "emerald": 0}
+    "chainmail_boots": {"iron_ingot": 40, "gold_ingot": 0, "emerald": 0},
+    "oak_planks": {"iron_ingot": 0, "gold_ingot": 4, "emerald": 0, "quantity": 16}
 }
+
+bed_layers_block = {1:"end_stone", 2:"oak_planks", 3:"wool"}
 
 class Bot(Thread):
     def __init__(self):
         super().__init__()
         self.ressources = {"gold_ingot": 0, "iron_ingot":0, "diamond":0, "emerald":0}
+        self.inventory = {}
         self.sword_tier = WOOD_TIER
         self.armor_tier = LEATHER_TIER
         self.x, self.y, self.z = m.player_position()
@@ -43,18 +47,20 @@ class Bot(Thread):
         self.upgrades_pos: tuple = None
         self.spawn_pos: tuple = None
         self.bed_prot_pos: dict = {}
+        self.bed_prot_status = []
         self.update()
+
 
     @staticmethod
     def get_bed_pos():
         bed_pos_dict = {"head": [], "foot": []}
-        pos1, pos2 = get_relative_region(20, 5, 5, 5, 2)
+        pos1, pos2 = get_relative_region(25, 5, 5, 5, 4)
         block_region = m.get_block_region(pos1, pos2)
         for x in range(pos1[0], pos2[0] + 1):
             for y in range(pos1[1], pos2[1] + 1):
                 for z in range(pos1[2], pos2[2] + 1):
                     block = block_region.get_block(x, y, z)
-                    if block is not None and "bed" in block:
+                    if block is not None and "bed" in block and "rock" not in block:
                         print("Bed found at", (x, y, z), block)
                         bed_pos_dict[block[-5:-1]] = (x, y, z)
         return bed_pos_dict
@@ -63,17 +69,53 @@ class Bot(Thread):
     def get_npc_pos(entities):
         shop_pos = []
         upgrades_pos = []
+        shop_pos_armor_stand = []
+        upgrades_armor_stand = []
+        villagers = []
         for entity in entities[:]:
             if entity.type == "entity.minecraft.armor_stand":
                 entities.remove(entity)
                 if "Upgrades" in entity.name:
-                    print("Upgrades NPC found at", entity.position)
-                    upgrades_pos = entity.position
-                    upgrades_pos[1] = ceil(upgrades_pos[1]) - 0.4
+                    print("Upgrades armor stand found at", entity.position)
+                    upgrades_armor_stand = entity.position
                 elif "Shop" in entity.name:
-                    print("Shop NPC found at", entity.position)
-                    shop_pos = entity.position
-                    shop_pos[1] = ceil(shop_pos[1]) - 0.4
+                    print("Shop armor stand found at", entity.position)
+                    shop_pos_armor_stand = entity.position
+            elif entity.type == "entity.minecraft.villager":
+                villagers.append(entity)
+        # find the closest villager of both armor stands and assign their position to the corresponding npc
+        closest_shop_villager = None
+        closest_upgrades_villager = None
+        closest_to_shop_distance = float("inf")
+        closest_to_upgrades_distance = float("inf")
+        for villager in villagers:
+            if shop_pos_armor_stand:
+                distance_to_shop = math.sqrt((villager.position[0] - shop_pos_armor_stand[0]) ** 2 + (villager.position[1] - shop_pos_armor_stand[1]) ** 2 + (villager.position[2] - shop_pos_armor_stand[2]) ** 2)
+                if distance_to_shop < closest_to_shop_distance:
+                    closest_to_shop_distance = distance_to_shop
+                    closest_shop_villager = villager
+            if upgrades_armor_stand:
+                distance_to_upgrades = math.sqrt((villager.position[0] - upgrades_armor_stand[0]) ** 2 + (villager.position[1] - upgrades_armor_stand[1]) ** 2 + (villager.position[2] - upgrades_armor_stand[2]) ** 2)
+                if distance_to_upgrades < closest_to_upgrades_distance:
+                    closest_to_upgrades_distance = distance_to_upgrades
+                    closest_upgrades_villager = villager
+        if closest_shop_villager:
+            shop_pos = list(closest_shop_villager.position)
+            yaw_rad = math.radians(closest_shop_villager.yaw)
+            shop_pos[0] = floor(shop_pos[0] - math.sin(yaw_rad))
+            shop_pos[1] = floor(shop_pos[1]) + 1
+            shop_pos[2] = floor(shop_pos[2] + math.cos(yaw_rad))
+            print("Shop pos (1 block in front of villager):", shop_pos)
+        else:
+            print("Shop villager not found, using armor stand position", shop_pos_armor_stand)
+            shop_pos = shop_pos_armor_stand
+        if closest_upgrades_villager:
+            upgrades_pos = list(closest_upgrades_villager.position)
+            yaw_rad = math.radians(closest_upgrades_villager.yaw)
+            upgrades_pos[0] = floor(upgrades_pos[0] - math.sin(yaw_rad))*2
+            upgrades_pos[1] = floor(upgrades_pos[1])
+            upgrades_pos[2] = floor(upgrades_pos[2] + math.cos(yaw_rad))*2
+            print("Upgrades pos (1 block in front of villager):", upgrades_pos)
         return shop_pos, upgrades_pos
 
     @staticmethod
@@ -87,7 +129,6 @@ class Bot(Thread):
         else:
             print("Generator not found")
             return []
-
 
     def get_bed_prot_coords(self, layer=2):
         head_x, _, head_z = self.bed_pos["head"]
@@ -116,11 +157,13 @@ class Bot(Thread):
             for rel_block in relative_blocks_to_head:
                 absolute_coords = get_relative_coords(yaw, *rel_block, player_coords=self.bed_pos["head"])
                 floored_abs_coords = (floor(absolute_coords[0]), floor(absolute_coords[1]), floor(absolute_coords[2]))
-                if floored_abs_coords not in prot_coords: new_prot_coords.append(floored_abs_coords)
+                if floored_abs_coords not in prot_coords and floored_abs_coords not in new_prot_coords:
+                    new_prot_coords.append(floored_abs_coords)
             for rel_block in relative_blocks_to_bottom:
                 absolute_coords = get_relative_coords(yaw, *rel_block, player_coords=self.bed_pos["foot"])
                 floored_abs_coords = (floor(absolute_coords[0]), floor(absolute_coords[1]), floor(absolute_coords[2]))
-                if floored_abs_coords not in prot_coords: prot_coords.append(floored_abs_coords)
+                if floored_abs_coords not in prot_coords and floored_abs_coords not in new_prot_coords:
+                    new_prot_coords.append(floored_abs_coords)
             new_prot_coords.sort(key=lambda x: x[1])
             prot_coords.extend(new_prot_coords)
         return prot_coords
@@ -130,52 +173,74 @@ class Bot(Thread):
         for ressource in self.ressources:
             self.ressources[ressource] = count_total_containing(player_inv, ressource)
 
+    def update_inventory(self):
+        player_inv = m.player_inventory()
+        self.inventory = {}
+        for item in item_prices:
+            self.inventory[item] = count_total_containing(player_inv, item)
+
+    def has_ressources_for(self, item, quantity=1):
+        return all(self.ressources[ressource] >= item_prices[item][ressource]*quantity for ressource in item_prices[item] if ressource not in ["quantity", "diamond"])
+
+    def get_closest_villager(self, starting_pos=None):
+        if starting_pos is None:
+            starting_pos = m.player_position()
+        entities = m.entities(max_distance=20)[:]
+        villagers = [entity for entity in entities if entity.type == "entity.minecraft.villager"]
+        closest_villager = None
+        closest_distance = float("inf")
+        for villager in villagers:
+            distance = math.sqrt((villager.position[0] - starting_pos[0]) ** 2 + (villager.position[1] - starting_pos[1]) ** 2 + (villager.position[2] - starting_pos[2]) ** 2)
+            if distance < closest_distance:
+                closest_distance = distance
+                closest_villager = villager
+        return closest_villager.position[0], closest_villager.position[1]+1, closest_villager.position[2]
+
     def buy(self, item_name: str = "wool", amount: int = 1):
 
         for ressource in self.ressources:
-            if self.ressources[ressource] < item_prices[ressource]:
+            if ressource != "diamond" and self.ressources[ressource] < item_prices[item_name][ressource]:
                 print("Not enough", ressource)
                 return
 
         screen_name = m.screen_name()
         if screen_name is None or "Shop" not in screen_name:
-            path = pathfinding.path_find((self.x, self.y, self.z), self.shop_pos, closest_if_fail=True)
-            pathfinding.path_walk_to(path=path)
-            look_at(*self.shop_pos)
+            print("not in shop")
+            distance_to_shop = math.sqrt((self.x - self.shop_pos[0]) ** 2 + (self.y - self.shop_pos[1]) ** 2 + (self.z - self.shop_pos[2]) ** 2)
+            if distance_to_shop > 2.2:
+                path = pathfinding.path_find((self.x, self.y, self.z), self.shop_pos, closest_if_fail=True)
+                print("found path")
+                pathfinding.path_walk_to(path=path)
+                print("path finded")
+            look_at(*self.get_closest_villager())
+            look(m.player_orientation()[0], 0)
             m.player_press_use(True)
             time.sleep(0.05)
             m.player_press_use(False)
             time.sleep(0.5)
-            screen_name = m.screen_name()
-        if screen_name is None or "Shop" not in screen_name:
-            m.player_press_forward(True)
-            time.sleep(0.1)
-            m.player_press_forward(False)
-            look_at(*self.shop_pos)
-            m.player_press_use(True)
-            time.sleep(0.05)
-            m.player_press_use(False)
-            time.sleep(0.5)
+            print("right clicked")
             screen_name = m.screen_name()
         if screen_name is None or "Shop" not in screen_name:
             print("Failed to get in the shop")
             return
         else:
             item_slot = find_items_containing(item_name, container=True)["wool" in item_name or "tnt" in item_name]
-            if item_slot is  None:
+            if item_slot is None:
                 print("Couldn't find the item")
+                # press escape
+                minescript_plus.Screen.close_screen()
                 return
 
             for i in range(amount):
                 Inventory.click_slot(item_slot)
                 time.sleep(0.15)
+            minescript_plus.Screen.close_screen()
 
-    def place_protection(self):
-        for coord in self.bed_prot_pos[1]:
-            if "air" not in m.getblock(coord[0], coord[1], coord[2]):
-                print(m.getblock(coord[0], coord[1], coord[2]))
-                continue
-            place_block(target_coords=coord)
+    def place_protection(self, prot_layer=1):
+        for coord in self.bed_prot_pos[prot_layer]:
+            place_block(coord, building_block=bed_layers_block[prot_layer])
+            time.sleep(0.05)
+        self.bed_prot_status.append(prot_layer)
 
     @staticmethod
     def wait_for_start_of_game():
@@ -199,17 +264,47 @@ class Bot(Thread):
             self.bed_pos = self.get_bed_pos()
         if not self.spawn_pos:
             self.spawn_pos = self.x, self.y, self.z
-        if 1 not in self.bed_prot_pos:
-            self.bed_prot_pos[1] = self.get_bed_prot_coords(2)
+        for i in range(1, 4):
+            if i not in self.bed_prot_pos:
+                self.bed_prot_pos[i] = self.get_bed_prot_coords(i)
         self.update_ressources()
+        self.update_inventory()
 
     def run(self):
         print("Started")
         #self.wait_for_start_of_game()
-        time.sleep(1)
+        time.sleep(2)
         while True:
             self.update()
-            time.sleep(0.05)
+            self.take_decision()
+
+    def take_decision(self):
+        bed_layer = 1
+        while bed_layer in self.bed_prot_status and bed_layer < 4:
+            bed_layer += 1
+        block = bed_layers_block[bed_layer]
+        while block in m.getblock(*self.bed_prot_pos[bed_layer][0]):
+            print("Bed protection layer", bed_layer, "is already being placed, next layer")
+            bed_layer += 1
+            block = bed_layers_block[bed_layer]
+        if bed_layer < 4:
+            print("Bed protection layer", bed_layer, "is not placed yet")
+            bed_prot_layer_size = len(self.bed_prot_pos[bed_layer])
+            if bed_prot_layer_size > self.inventory[block]:
+                quantity_to_buy = ceil((bed_prot_layer_size-self.inventory[block])/item_prices[block]["quantity"])
+                print(f"Not enough {block} for bed protection layer {bed_layer}, need to buy {quantity_to_buy} more")
+                if not self.has_ressources_for(block, quantity_to_buy):
+                    print("Not enough ressources to buy blocks for bed protection layer", bed_layer)
+                    self.move_to_generator()
+                    return
+                print("Buying blocks for bed protection layer", bed_layer)
+                self.buy(block, quantity_to_buy)
+            else:
+                print("enough blocks in inventory for bed protection layer", bed_layer)
+                self.place_protection(bed_layer)
+        else:
+            print("All bed protection layers are placed or in progress")
+
 
     def move_to_generator(self):
         c_x, c_y, c_z = m.player_position()
