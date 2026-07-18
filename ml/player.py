@@ -85,15 +85,15 @@ class Player:
         self.yaw = [] # sin(yaw), cos(yaw)
         self.update_yaw_pitch()
         self.dist_xz = 0
+        self.dist_3d = 0
         self.current_standing_block = "minecraft:air"
         self.standing_block_category = 0
         self.is_grounded = False
         self.data_region_around = []
 
         self.ticks_since_jump = 0
-        # is forward, is left, is right, is backwards, is sprint, is sneak, is jump
-        self.last_action = [False, False, False]
-        #self.last_action = [False, False, False, False, False]
+        # forward, strafe_left, strafe_right, sprint, jump
+        self.last_action = [False, False, False, False, False]
 
 
 
@@ -161,6 +161,7 @@ class Player:
         self.strafe_dist = dz * sin_yaw + dx * cos_yaw
         self.vertical_dist = dy
         self.dist_xz = (dx**2 + dz**2)**0.5
+        self.dist_3d = (dx**2 + dy**2 + dz**2)**0.5
 
     def update_velocity(self):
         vx, vy, vz = m.player().velocity

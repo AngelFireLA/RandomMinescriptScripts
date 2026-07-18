@@ -28,11 +28,12 @@ def _overlaps_block_xz(px: float, pz: float, bx: int, bz: int) -> bool:
         (pz + half) > (bz + margin) and (pz - half) < (bz + 1 - margin)
     )
 
-one_hot = False
+one_hot = True
 class ParkourEnvironment(gym.Env):
     metadata = {"render_modes": ["human"], "render_fps": 20}
 
-    def __init__(self, checkpoints, max_steps=300, action_repeat=3, yaw_bins=11, render_mode=None):
+    def __init__(self, checkpoints, max_steps=200, action_repeat=3, yaw_bins=21,
+                 render_mode=None, curriculum_start=0, curriculum_end=None):
         self.player = Player()
         super().__init__()
         self.checkpoints = checkpoints
@@ -41,14 +42,16 @@ class ParkourEnvironment(gym.Env):
         self.yaw_bins = int(yaw_bins)
         self.render_mode = render_mode
 
+        # ----- Curriculum learning -----
+        self.curriculum_start = int(curriculum_start)
+        self.curriculum_end = int(curriculum_end if curriculum_end is not None
+                                  else min(5, len(checkpoints) - 1))
+
         # ----- Action space -----
-        # [forward, , jump, sprint yaw_bin]
-        self.action_space = spaces.MultiDiscrete([2, 2, 2, self.yaw_bins])
-        #self.action_space = spaces.MultiDiscrete([2, 2, 2, 2, 2, self.yaw_bins])
+        # [forward, strafe_left, strafe_right, jump, sprint, yaw_bin]
+        self.action_space = spaces.MultiDiscrete([2, 2, 2, 2, 2, self.yaw_bins])
 
         # ----- Observation space -----
-        # You decide obs_dim after you finalize your feature vector length.
-        # Example placeholders:
         obs_dim = self._compute_obs_dim()
         self.observation_space = spaces.Box(
             low=-np.inf, high=np.inf, shape=(obs_dim,), dtype=np.float32
@@ -66,7 +69,7 @@ class ParkourEnvironment(gym.Env):
         total += len(["forward dist", "strafe dist", "vertical dist"])
         total += len(["forward vel", "strafe vel", "vertical vel"])
         total += len(["sin yaw", "cos_yaw"])
-        total += len(["dist xz", "standing block category"])
+        total += len(["dist_3d", "standing block category"])
         total += len(["is grounded", "time since last jump"])
         total += len(self.player.last_action)
         region = self.player.region_around
@@ -77,14 +80,15 @@ class ParkourEnvironment(gym.Env):
         return total
 
     def _decode_action(self, action):
-        forward, jump, sprint, yaw_bin = action
-
+        forward, strafe_left, strafe_right, jump, sprint, yaw_bin = action
 
         center = (self.yaw_bins - 1) / 2.0
         yaw_delta_deg = (yaw_bin - center)
 
         return {
             "forward": bool(forward),
+            "strafe_left": bool(strafe_left),
+            "strafe_right": bool(strafe_right),
             "jump": bool(jump),
             "sprint": bool(sprint),
             "yaw_delta_deg": float(yaw_delta_deg),
@@ -144,8 +148,8 @@ class ParkourEnvironment(gym.Env):
         feats.append(float(sin_yaw))
         feats.append(float(cos_yaw))
 
-        # (4) dist_xz + standing block category (2)
-        feats.append(float(self.player.dist_xz))
+        # (4) dist_3d + standing block category (2)
+        feats.append(float(self.player.dist_3d))
         feats.append(float(self.player.standing_block_category))  # scalar (0..8)
 
         # (5) grounded + ticks_since_jump (2)
@@ -178,6 +182,8 @@ class ParkourEnvironment(gym.Env):
         m.player_press_jump(False)
         m.player_press_sprint(False)
         m.player_press_sneak(False)
+        m.player_press_left(False)
+        m.player_press_right(False)
 
     import math
 
@@ -195,10 +201,12 @@ class ParkourEnvironment(gym.Env):
         self.step_count = 0
         self.prev_dist = None
         self.player.ticks_since_jump = 999
-        self.player.last_action = [False] * 3 #sneak
-        #self.player.last_action = [False] * 5
-        # choose start checkpoint (randomize during training, etc.)
-        self.current_cp_index = int(self.np_random.integers(0, len(self.checkpoints) - 1))
+        self.player.last_action = [False] * 5  # forward, strafe_left, strafe_right, sprint, jump
+        # Curriculum: only spawn within the current learning window
+        self.current_cp_index = int(self.np_random.integers(
+            self.curriculum_start,
+            max(self.curriculum_start + 1, self.curriculum_end)
+        ))
         checkpoint = self.checkpoints[self.current_cp_index]
         x, y, z = checkpoint
         m.execute(f"tp {x} {y} {z}")
@@ -208,7 +216,7 @@ class ParkourEnvironment(gym.Env):
         m.player_set_orientation(yaw, 0)
         m.flush()  # important
         obs = self._get_obs()
-        self.prev_dist = float(self.player.dist_xz)
+        self.prev_dist = float(self.player.dist_3d)
         info = self._get_info()
         return obs, info
 
@@ -237,51 +245,44 @@ class ParkourEnvironment(gym.Env):
         truncated = False
         reward = 0.0
 
-        # Example termination logic:
-        # - success: reached final checkpoint -> terminated True, big reward
-        # - fail: fell below some Y -> terminated True, big penalty
-        # - timeout: step_count >= max_steps -> truncated True
-
         if self.step_count >= self.max_steps:
             print("Too slow")
             truncated = True
-            reward -= 1
+            reward -= 2
 
         y = m.player_position()[1]
         if y <= self.low_point():
             terminated = True
-            reward -= 2
+            reward -= 3
 
-        #time penalty
-        reward -= 0.01
+        # time penalty (stronger to discourage dawdling)
+        reward -= 0.02
 
-        # distance based reward
+        # 3D distance-based reward shaping
         if self.prev_dist is None:
-            self.prev_dist = float(self.player.dist_xz)
+            self.prev_dist = float(self.player.dist_3d)
 
-        curr_dist = float(self.player.dist_xz)
-        delta = self.prev_dist - curr_dist
+        curr_dist = float(self.player.dist_3d)
+        delta = self.prev_dist - curr_dist  # positive when getting closer
 
-        # clip to avoid huge spikes
-        delta = float(np.clip(delta, -0.2, 0.2))
-        reward += 0.2 * delta
+        # clip to avoid huge spikes but keep it meaningful
+        delta = float(np.clip(delta, -1.0, 1.0))
+        reward += 0.5 * delta
 
         self.prev_dist = curr_dist
 
         if self.has_reached_checkpoint():
             print("Has reached checkpoint", self.current_cp_index)
-            reward += 3
+            reward += 5
             self.current_cp_index += 1
             new_goal = self._get_goal_checkpoint()
             self.player.recalc_coords(new_goal)
-            self.prev_dist = float(self.player.dist_xz)
+            self.prev_dist = float(self.player.dist_3d)
 
             if self.has_reached_goal():
                 print("reached end goal")
-                reward += 10
+                reward += 15
                 terminated = True
-
-
 
         return float(reward), bool(terminated), bool(truncated)
 
@@ -289,8 +290,9 @@ class ParkourEnvironment(gym.Env):
         # yaw update (instant)
         yaw, pitch = m.player_orientation()
         m.player_press_sprint(a["sprint"])
-        m.flush()
         m.player_press_forward(a["forward"])
+        m.player_press_left(a["strafe_left"])
+        m.player_press_right(a["strafe_right"])
         m.player_set_orientation(yaw + a["yaw_delta_deg"], pitch)
         m.flush()
 
@@ -317,6 +319,8 @@ class ParkourEnvironment(gym.Env):
         a = self._decode_action(action)
         self.player.last_action = [
             a["forward"],
+            a["strafe_left"],
+            a["strafe_right"],
             a["sprint"],
             a["jump"],
         ]
@@ -328,7 +332,7 @@ class ParkourEnvironment(gym.Env):
         reward, terminated, truncated = self._compute_reward_and_done(a)
         info = self._get_info()
 
-        if (terminated or truncated):
+        if terminated or truncated:
             self._release_all_controls()
 
         if terminated and self.has_reached_goal():

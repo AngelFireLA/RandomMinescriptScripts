@@ -18,10 +18,15 @@ def fix_home_and_matplotlib():
         os.environ.setdefault("USERPROFILE", home)
         os.environ.setdefault("HOME", home)
 
-        # These help expanduser('~') on Windows
+    # These help expanduser('~') on Windows
         p = Path(home)
         os.environ.setdefault("HOMEDRIVE", p.drive)               # "C:"
         os.environ.setdefault("HOMEPATH", "\\" + "\\".join(p.parts[1:]))  # "\Users\marie"
+
+        # Fix for getpass.getuser() failing inside torch
+        os.environ.setdefault("USERNAME", os.path.basename(home))
+        os.environ.setdefault("USER", os.path.basename(home))
+        os.environ.setdefault("LOGNAME", os.path.basename(home))
 
     # Keep matplotlib from touching ~/.matplotlib at all
     mpl_dir = os.path.join(os.getcwd(), "_mplconfig")
@@ -43,15 +48,15 @@ from parkour_environment import ParkourEnvironment  # your file
 # ==========================
 # RESUME SETTINGS (edit here)
 # ==========================
-RESUME = True                 # <-- switch on/off
+RESUME = False                # <-- old model incompatible with new action/obs space
 RESUME_FROM = "best"          # "best" (recommended) or "latest"
-TOTAL_TIMESTEPS = 5_000_000   # total target timesteps for the whole run
+TOTAL_TIMESTEPS = 10_000_000  # total target timesteps for the whole run
 MODELS_DIR = "models"
 
 
 # --------- your checkpoints file ----------
-file_path = r"C:\Users\marie\Desktop\MultiMC\instances\1.21.10 minescripts\.minecraft\minescript\parkour_courses/"
-file_path += "gauntlet.txt"
+file_path = r"C:\Users\marie\Desktop\MultiMC\instances\1.21.10 minescripts\.minecraft\minescript\ml\parkour_courses"
+file_path += r"\gauntlet.txt"
 
 def load_checkpoints():
     data = []
@@ -61,13 +66,15 @@ def load_checkpoints():
             data.append(row)
     return data
 
-def make_env(checkpoints):
+def make_env(checkpoints, curriculum_start=0, curriculum_end=None):
     def _init():
         env = ParkourEnvironment(
             checkpoints=checkpoints,
-            max_steps=500,
+            max_steps=200,
             action_repeat=1,
-            yaw_bins=61,
+            yaw_bins=21,
+            curriculum_start=curriculum_start,
+            curriculum_end=curriculum_end,
         )
         return Monitor(env)
     return _init
@@ -103,6 +110,72 @@ class EvalSaveBestWithVecNormalize(EvalCallback):
                 venv.save(self.best_vecnormalize_path)
 
         return ok
+
+
+class CurriculumCallback(BaseCallback):
+    """
+    Monitors checkpoint success and progressively expands the curriculum window.
+    When the agent reaches a checkpoint with high enough frequency, we extend
+    the curriculum_end to include more checkpoints.
+    """
+    def __init__(self, expand_every: int = 25_000, expand_by: int = 3,
+                 success_threshold: float = 0.3, verbose: int = 0):
+        super().__init__(verbose)
+        self.expand_every = expand_every  # check every N timesteps
+        self.expand_by = expand_by        # how many checkpoints to add
+        self.success_threshold = success_threshold
+        self.last_check = 0
+        self.checkpoint_successes = 0
+        self.checkpoint_attempts = 0
+
+    def _on_step(self) -> bool:
+        # Count episodes via the Monitor wrapper info
+        infos = self.locals.get("infos", [])
+        for info in infos:
+            if "episode" in info:
+                self.checkpoint_attempts += 1
+                # Consider it a success if the agent reached at least one checkpoint
+                if info.get("cp_index", 0) > 0 or info.get("is_success", False):
+                    self.checkpoint_successes += 1
+
+        # Periodically check if we should expand
+        if self.num_timesteps - self.last_check >= self.expand_every:
+            self.last_check = self.num_timesteps
+
+            if self.checkpoint_attempts > 0:
+                rate = self.checkpoint_successes / self.checkpoint_attempts
+                print(f"[Curriculum] Timestep {self.num_timesteps}: "
+                      f"success rate = {rate:.2%} ({self.checkpoint_successes}/{self.checkpoint_attempts})")
+
+                if rate >= self.success_threshold:
+                    # Expand curriculum in all training envs
+                    venv = self.model.get_env()
+                    # Unwrap through VecNormalize if present
+                    base_env = venv
+                    while hasattr(base_env, 'venv'):
+                        base_env = base_env.venv
+
+                    for env in base_env.envs:
+                        inner = env
+                        # Unwrap Monitor
+                        while hasattr(inner, 'env'):
+                            inner = inner.env
+                        if hasattr(inner, 'curriculum_end'):
+                            old_end = inner.curriculum_end
+                            max_end = len(inner.checkpoints) - 1
+                            new_end = min(old_end + self.expand_by, max_end)
+                            if new_end > old_end:
+                                inner.curriculum_end = new_end
+                                print(f"[Curriculum] Expanded window: {old_end} -> {new_end} "
+                                      f"(of {max_end} total checkpoints)")
+                            else:
+                                print(f"[Curriculum] Already at max ({max_end})")
+
+            # Reset counters for next window
+            self.checkpoint_successes = 0
+            self.checkpoint_attempts = 0
+
+        return True
 
 
 # ---------------- resume helpers ----------------
@@ -190,7 +263,7 @@ def main():
     print("Created Environments")
 
     # Either load existing model or create a new one
-    policy_kwargs = dict(net_arch=[256, 256])
+    policy_kwargs = dict(net_arch=[512, 256, 128])
 
     if RESUME and resume_model_path and os.path.exists(resume_model_path):
         model = PPO.load(resume_model_path, env=train_env, device="auto", verbose=1)
@@ -202,12 +275,12 @@ def main():
             train_env,
             verbose=1,
             n_steps=2048,
-            batch_size=128,
+            batch_size=256,
             gamma=0.995,
             gae_lambda=0.95,
             clip_range=0.2,
-            ent_coef=0.01,
-            learning_rate=2e-4,
+            ent_coef=0.02,
+            learning_rate=3e-4,
             policy_kwargs=policy_kwargs,
             tensorboard_log="tb_parkour",
             device="auto",
@@ -237,8 +310,9 @@ def main():
 
     callbacks = [
         checkpoint_cb,
-        EntCoefAnnealCallback(start=0.01, end=0.001, total_timesteps=TOTAL_TIMESTEPS),
+        EntCoefAnnealCallback(start=0.02, end=0.002, total_timesteps=TOTAL_TIMESTEPS),
         eval_cb,
+        CurriculumCallback(expand_every=25_000, expand_by=3, success_threshold=0.3),
     ]
 
     # Compute remaining timesteps if resuming

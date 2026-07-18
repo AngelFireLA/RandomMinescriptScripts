@@ -36,7 +36,7 @@ from stable_baselines3.common.monitor import Monitor
 
 from parkour_environment import ParkourEnvironment
 
-file_path = r"C:\Users\marie\Desktop\MultiMC\instances\1.21.10 minescripts\.minecraft\minescript\parkour_courses/basic_5.txt"
+file_path = r"/ml/parkour_courses/basic_5.txt"
 
 def load_checkpoints():
     data = []
@@ -50,9 +50,11 @@ def make_env(checkpoints):
     def _init():
         env = ParkourEnvironment(
             checkpoints=checkpoints,
-            max_steps=100,
+            max_steps=200,
             action_repeat=1,
-            yaw_bins=61,
+            yaw_bins=21,
+            curriculum_start=0,
+            curriculum_end=len(checkpoints) - 1,  # eval uses full course
         )
         env = Monitor(env)
         return env
