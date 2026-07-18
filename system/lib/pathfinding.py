@@ -425,9 +425,12 @@ def path_find(start, goal, do_smooth=True, closest_if_fail=False):
     start = tuple(map(math.floor, start))
     goal  = tuple(map(math.floor, goal))
 
+    #print(f"[pathfind] START path_find from {start} to {goal} | smooth={do_smooth} closest_if_fail={closest_if_fail}")
+
     cache = {}
     start_node = Node(start)
     start_node.H = start_node.heuristic(goal)
+    #print(f"[pathfind] Initial heuristic (distance to goal): {start_node.H:.2f}")
 
     # (F, H, tie, Node) — tie breaker keeps heap operations predictable
     pq = []
@@ -440,30 +443,50 @@ def path_find(start, goal, do_smooth=True, closest_if_fail=False):
     # Track the closest node to goal (for closest_if_fail)
     best_node = start_node
     best_h = start_node.H
+    
+    iterations = 0
+    log_interval = 500  # log every N iterations
 
     while pq:
         _, _, _, current = heapq.heappop(pq)
         if current.pos in closed:
             continue
         
+        iterations += 1
+        
         # Update best node if this one is closer to goal
         if current.H < best_h:
             best_node = current
             best_h = current.H
 
+        # Periodic progress logging
+        if iterations % log_interval == 0:
+            elapsed = time.time() - start_time
+            # print(
+            #     f"[pathfind] iter={iterations} | open={len(pq)} closed={len(closed)} "
+            #     f"| current={current.pos} F={current.F:.2f} G={current.G:.2f} H={current.H:.2f} "
+            #     f"| best_H={best_h:.2f} | elapsed={elapsed:.2f}s"
+            # )
+
         if current.pos == goal:
             raw_path = reconstruct_path(current)
             final_path = smooth_path(raw_path, cache) if do_smooth else raw_path
             dist = math.sqrt(sum((a - b) ** 2 for a, b in zip(goal, start)))
+            elapsed = time.time() - start_time
+            # print(
+            #     f"[pathfind] SUCCESS! Path found in {iterations} iterations, {elapsed:.3f}s | "
+            #     f"raw_nodes={len(raw_path)} smooth_nodes={len(final_path)} | distance={dist:.2f}"
+            # )
             minescript.echo(
-                f"Pathfinding took {time.time() - start_time:.3f}s | "
+                f"Pathfinding took {elapsed:.3f}s | "
                 f"Nodes: {len(final_path)} | Distance: {dist:.2f}"
             )
             return final_path
 
         closed.add(current.pos)
 
-        for npos in current.neighbors(cache):
+        neighbors = current.neighbors(cache)
+        for npos in neighbors:
             if npos in closed:
                 continue
 
@@ -492,16 +515,27 @@ def path_find(start, goal, do_smooth=True, closest_if_fail=False):
                 heapq.heappush(pq, (neighbor.F, neighbor.H, next(_tie), neighbor))
 
     # No complete path found
+    elapsed = time.time() - start_time
+    # print(
+    #     f"[pathfind] EXHAUSTED open set after {iterations} iterations, {elapsed:.3f}s | "
+    #     f"closed={len(closed)} | best_H={best_h:.2f} best_pos={best_node.pos}"
+    # )
     if closest_if_fail and best_node.pos != start:
         raw_path = reconstruct_path(best_node)
         final_path = smooth_path(raw_path, cache) if do_smooth else raw_path
         dist_to_best = math.sqrt(sum((a - b) ** 2 for a, b in zip(best_node.pos, start)))
         dist_remaining = math.sqrt(sum((a - b) ** 2 for a, b in zip(goal, best_node.pos)))
+        # print(
+        #     f"[pathfind] Returning PARTIAL path: {len(final_path)} nodes | "
+        #     f"traveled={dist_to_best:.2f} remaining={dist_remaining:.2f}"
+        # )
+        #print(f"[pathfind] Partial path waypoints: {final_path}")
         minescript.echo(
-            f"Pathfinding (partial) took {time.time() - start_time:.3f}s | "
+            f"Pathfinding (partial) took {elapsed:.3f}s | "
             f"Nodes: {len(final_path)} | Traveled: {dist_to_best:.2f} | Remaining: {dist_remaining:.2f}"
         )
         return final_path
+    #print(f"[pathfind] Returning None (no path found, closest_if_fail={closest_if_fail})")
     return None
 
 # ---- Movement --------------------------------------------------------------
@@ -696,7 +730,7 @@ def _advance_along_path(points: List[Vec3], idx: int, t: float, ds: float) -> Tu
 def path_walk_to(
     goal: Optional[Tuple[float, float, float]] = None,
     path: Optional[List[Block]] = None,
-    distance: float = 1.0,
+    distance: float = 1,
     look_ahead: int = 1,          # kept for API compatibility (unused in new logic)
     lookahead_distance: float = 2.5,  # pure-pursuit radius in blocks
     accel: float = 0.20,
@@ -721,14 +755,25 @@ def path_walk_to(
     # Acquire path
     if path is None:
         if goal is None:
+            #print("[walk] No goal and no path provided, returning early")
             return
         start = tuple(map(float, minescript.player_position()))
+        #print(f"[walk] No path provided, computing path from {start} to {goal}")
         path = path_find(start, goal)
+
+    if path is None:
+        #print("[walk] path_find returned None, cannot walk")
+        return
 
     # Pre-center nodes once
     centers: List[Vec3] = [ _center(b) for b in path ]
     if not centers:
+        #print("[walk] Empty path (no centers), returning early")
         return
+
+    #print(f"[walk] START path_walk_to | path has {len(path)} waypoints, {len(centers)} centers")
+    #print(f"[walk] Path waypoints: {path}")
+    #print(f"[walk] arrival_distance={distance} lookahead={lookahead_distance}")
 
     # publish for jump loop
     path_ref[0] = path
@@ -743,6 +788,7 @@ def path_walk_to(
 
     # Stop when within 'distance' of final target
     final_target = centers[-1]
+    #print(f"[walk] Final target (center of last waypoint): {final_target}")
 
     # Small hysteresis radius for node passing
     pass_eps = max(0.35, distance * 0.35)
@@ -755,18 +801,68 @@ def path_walk_to(
     urg_delta_up_cap = 0.35
     urg_delta_dn_cap = 0.15
 
+    # Logging state
+    tick = 0
+    log_interval = 50  # log every N ticks
+    walk_start_time = time.time()
+    last_pos = None
+    stuck_ticks = 0
+    stuck_threshold = 100  # ticks without movement to consider stuck
+    stuck_distance = 0.15  # min movement per check to not be stuck
 
     while True:
         px, py, pz = map(float, minescript.player_position())
         p = (px, py, pz)
+        tick += 1
+
+        # Stuck detection
+        if last_pos is not None:
+            moved = _len(_sub(p, last_pos))
+            if moved < stuck_distance:
+                stuck_ticks += 1
+            else:
+                stuck_ticks = 0
+        last_pos = p
+
+        if stuck_ticks == stuck_threshold:
+            dist_to_goal = _len(_sub(final_target, p))
+            # print(
+            #     f"[walk] WARNING: STUCK for {stuck_threshold} ticks! "
+            #     f"pos=({px:.2f}, {py:.2f}, {pz:.2f}) dist_to_goal={dist_to_goal:.2f} "
+            #     f"segment={i}/{len(centers)-1} t={t:.3f}"
+            # )
+        elif stuck_ticks > 0 and stuck_ticks % (stuck_threshold * 3) == 0:
+            dist_to_goal = _len(_sub(final_target, p))
+            # print(
+            #     f"[walk] WARNING: STILL STUCK ({stuck_ticks} ticks)! "
+            #     f"pos=({px:.2f}, {py:.2f}, {pz:.2f}) dist_to_goal={dist_to_goal:.2f}"
+            # )
 
         # Goal reached?
-        if _len(_sub(final_target, p)) <= max(distance, 0.1):
+        dist_to_final = _len(_sub(final_target, p))
+        if dist_to_final <= max(distance, 0.1):
+            elapsed = time.time() - walk_start_time
+            # print(
+            #     f"[walk] GOAL REACHED in {tick} ticks, {elapsed:.2f}s | "
+            #     f"pos=({px:.2f}, {py:.2f}, {pz:.2f}) dist={dist_to_final:.3f}"
+            # )
             break
+
+        # Periodic logging
+        if tick % log_interval == 0:
+            elapsed = time.time() - walk_start_time
+            # print(
+            #     f"[walk] tick={tick} | pos=({px:.2f}, {py:.2f}, {pz:.2f}) "
+            #     f"dist_to_goal={dist_to_final:.2f} | seg={i}/{len(centers)-1} t={t:.3f} "
+            #     f"| fwd_v={forward_v:.3f} strafe_v={strafe_v:.3f} "
+            #     f"| stuck={stuck_ticks} | elapsed={elapsed:.1f}s"
+            # )
 
         # Ensure valid segment
         if i >= len(centers) - 1:
             # We're on (last node, none). Snap to last and finish.
+            #if tick <= 5 or tick % log_interval == 0:
+                #print(f"[walk] Clamping to last segment (i was {i}, len={len(centers)})")
             i = len(centers) - 2
             t = 1.0
 
@@ -837,6 +933,8 @@ def path_walk_to(
         move_dir = _norm((to[0], 0.0, to[2]))  # keep ground movement planar
         if move_dir == (0.0, 0.0, 0.0):
             # Avoid division issues at target; release keys
+            #if tick % log_interval == 0:
+                #print(f"[walk] tick={tick} move_dir is zero, releasing keys")
             minescript.player_press_forward(False)
             minescript.player_press_backward(False)
             minescript.player_press_left(False)
@@ -866,6 +964,8 @@ def path_walk_to(
         minescript.player_press_right(spos)
 
     # Release keys at the end
+    elapsed = time.time() - walk_start_time
+    #print(f"[walk] DONE, releasing all keys after {tick} ticks, {elapsed:.2f}s")
     minescript.player_press_forward(False)
     minescript.player_press_backward(False)
     minescript.player_press_left(False)

@@ -8,6 +8,21 @@ from minescript_plus import Inventory, lib_nbt_module, Screen, _get_nbt
 import camera
 import pathfinding
 
+def setup_baritone():
+    # Disable breaking blocks to clear a path
+    m.chat("#allowBreak false")
+    # Disable placing blocks (bridges/pillars) to cross gaps
+    m.chat("#allowPlace false")
+    # Allow parkour (jumping gaps)
+    m.chat("#allowParkour true")
+    # Reduce chat spam
+    m.chat("#chatControl false")
+    m.chat("#allowWalkOnBottomSlab true")
+    m.chat("#jumpPenalty 0")
+    m.chat("allowDiagonalDescend true")
+
+setup_baritone()
+
 def find_items(item_id: str, cust_name: str = "", container: bool = False, try_open: bool = False) -> int | None:
     """
     Finds the first inventory slot containing a specific item, optionally by matching a custom name, and optionally by
@@ -215,26 +230,34 @@ def quick_use():
     time.sleep(0.05)
     m.player_press_use(False)
 
-def place_block(target_coords=None):
+def place_block(target_coords=None, building_block="wool"):
     yaw = m.player_orientation()[0]
     if not target_coords:
         target_coords = get_relative_coords(yaw, forward=2, side=0)
-    if 'air' in m.getblock(target_coords[0], target_coords[1]-1, target_coords[2]):
-        print("Cannot place block: No solid block beneath target coordinates.", target_coords)
+    if "air" not in m.get_block(*target_coords):
         return
-    print(target_coords)
-    path = pathfinding.path_find(m.player_position(), target_coords)
-    if path is not None:
-        pathfinding.path_walk_to(goal=target_coords, distance=0.3)
-        camera.look(yaw, 90)
-        m.player_press_sneak(True)
-        m.player_press_jump(True)
-        while m.player_position()[1] < target_coords[1] + 1:
-            time.sleep(0.05)
-        m.player_press_jump(False)
 
-        quick_use()
-        m.player_press_sneak(False)
-        print("Placed block at", target_coords)
-    else:
-        print("No path found to target coordinates.")
+    original_building_block = building_block
+    building_block = None
+    for item in m.player_inventory():
+        if original_building_block in item.item:
+            building_block = item.item
+            print("Using building block:", building_block)
+            break
+
+    if building_block is None:
+        print(f"Error: No {original_building_block} found in inventory.")
+        return
+
+    m.chat(f"#sel clear")
+    time.sleep(0.05)
+    m.chat(f"#sel 1 {target_coords[0]} {target_coords[1]} {target_coords[2]}")
+    time.sleep(0.05)
+    m.chat(f"#sel 2 {target_coords[0]} {target_coords[1]} {target_coords[2]}")
+    time.sleep(0.05)
+    m.chat(f"#sel set {building_block}")
+    for i in range(500):
+        time.sleep(0.05)
+        if building_block in m.get_block(*target_coords):
+            break
+    print("Placed block at", target_coords)
