@@ -10,7 +10,6 @@ from bridge import eagle_bridge, breezly_bridge, moon_bridge, setup_crosshair
 from camera import look_at, look
 from minescript_plus import Keybind, Inventory
 from minescript_plus_plus import find_items_containing, count_total_containing, get_relative_region, get_relative_coords, place_block
-import pathfinding
 print("Bedwars script launched !")
 kb = Keybind()
 
@@ -48,8 +47,23 @@ class Bot(Thread):
         self.spawn_pos: tuple = None
         self.bed_prot_pos: dict = {}
         self.bed_prot_status = []
-        self.update()
+        #self.update()
 
+    def smart_move(self, x, y, z):
+        y = floor(y)
+
+        m.chat("#cancel")
+        time.sleep(0.05)
+        # Using goal + path is often more stable than goto for scripts
+        m.chat(f"#goto {x} {y} {z}")
+        curr_pos = m.player_position()
+        distance = math.sqrt((curr_pos[0] - x) ** 2 + (curr_pos[1] - y) ** 2 + (curr_pos[2] - z) ** 2)
+        # while the player is more than a block away from the target, we wait
+        while distance > 0.5:
+            time.sleep(0.05)
+            curr_pos = m.player_position()
+            distance = math.sqrt((curr_pos[0] - x) ** 2 + (curr_pos[1] - y) ** 2 + (curr_pos[2] - z) ** 2)
+        m.chat("#cancel")
 
     @staticmethod
     def get_bed_pos():
@@ -67,8 +81,6 @@ class Bot(Thread):
 
     @staticmethod
     def get_npc_pos(entities):
-        shop_pos = []
-        upgrades_pos = []
         shop_pos_armor_stand = []
         upgrades_armor_stand = []
         villagers = []
@@ -102,20 +114,23 @@ class Bot(Thread):
         if closest_shop_villager:
             shop_pos = list(closest_shop_villager.position)
             yaw_rad = math.radians(closest_shop_villager.yaw)
-            shop_pos[0] = floor(shop_pos[0] - math.sin(yaw_rad))
+            shop_pos[0] = floor(shop_pos[0] - 3 * math.sin(yaw_rad))
             shop_pos[1] = floor(shop_pos[1]) + 1
-            shop_pos[2] = floor(shop_pos[2] + math.cos(yaw_rad))
-            print("Shop pos (1 block in front of villager):", shop_pos)
+            shop_pos[2] = floor(shop_pos[2] + 3 * math.cos(yaw_rad))
+            print("Shop pos (3 blocks in front of villager):", shop_pos)
         else:
             print("Shop villager not found, using armor stand position", shop_pos_armor_stand)
             shop_pos = shop_pos_armor_stand
         if closest_upgrades_villager:
             upgrades_pos = list(closest_upgrades_villager.position)
             yaw_rad = math.radians(closest_upgrades_villager.yaw)
-            upgrades_pos[0] = floor(upgrades_pos[0] - math.sin(yaw_rad))*2
+            upgrades_pos[0] = floor(upgrades_pos[0] - 3 * math.sin(yaw_rad))
             upgrades_pos[1] = floor(upgrades_pos[1])
-            upgrades_pos[2] = floor(upgrades_pos[2] + math.cos(yaw_rad))*2
-            print("Upgrades pos (1 block in front of villager):", upgrades_pos)
+            upgrades_pos[2] = floor(upgrades_pos[2] + 3 * math.cos(yaw_rad))
+            print("Upgrades pos (3 blocks in front of villager):", upgrades_pos)
+        else:
+            print("Upgrades villager not found, using armor stand position", upgrades_armor_stand)
+            upgrades_pos = upgrades_armor_stand
         return shop_pos, upgrades_pos
 
     @staticmethod
@@ -139,20 +154,19 @@ class Bot(Thread):
 
         yaw = math.degrees(math.atan2(-dx, dz))
         prot_coords = []
-        for i in range(1, layer+1):
+        for i in range(1, layer + 1):
             new_prot_coords = []
             relative_blocks_to_head = []
             relative_blocks_to_bottom = []
             for forward in range(-i, i + 1):
                 for side in range(-i, i + 1):
-                    for up in range(0, i+1):
+                    for up in range(0, i + 1):
                         if (forward == 0 and side == 0 and up == 0) or (abs(forward) + abs(side) + abs(up) > i):
                             continue
                         if forward >= 0:
                             relative_blocks_to_head.append((forward, side, up))
                         if forward <= 0:
                             relative_blocks_to_bottom.append((forward, side, up))
-
 
             for rel_block in relative_blocks_to_head:
                 absolute_coords = get_relative_coords(yaw, *rel_block, player_coords=self.bed_pos["head"])
@@ -164,8 +178,61 @@ class Bot(Thread):
                 floored_abs_coords = (floor(absolute_coords[0]), floor(absolute_coords[1]), floor(absolute_coords[2]))
                 if floored_abs_coords not in prot_coords and floored_abs_coords not in new_prot_coords:
                     new_prot_coords.append(floored_abs_coords)
-            new_prot_coords.sort(key=lambda x: x[1])
-            prot_coords.extend(new_prot_coords)
+
+            # # First, sort all blocks in this layer by their y coordinate
+            # new_prot_coords.sort(key=lambda x: x[1])
+
+            # Group blocks by their y coordinate (height)
+            height_groups = {}
+            for coord in new_prot_coords:
+                y_value = 1
+                if y_value not in height_groups:
+                    height_groups[y_value] = []
+                height_groups[y_value].append(coord)
+
+            # For each height group, sort the blocks by distance to the first block in that group
+            # This makes placement more efficient by keeping the bot close to where it last placed
+            sorted_new_prot_coords = []
+            for y_value in sorted(height_groups.keys()):
+                group = height_groups[y_value]
+                if len(group) <= 1:
+                    # No need to sort if there's only one block at this height
+                    sorted_new_prot_coords.extend(group)
+                    continue
+
+                # The first block in the group acts as the reference point
+                first_block = group[0]
+                remaining_blocks = list(group[1:])
+
+                # Start the sorted list with the first block
+                sorted_group = [first_block]
+
+                # Greedily pick the nearest unvisited block each time (nearest-neighbor approach)
+                current_block = first_block
+                while remaining_blocks:
+                    # Calculate the distance from the current block to every remaining block
+                    closest_block = None
+                    closest_distance = float('inf')
+                    for candidate_block in remaining_blocks:
+                        # Calculate squared Euclidean distance (no need to sqrt for comparison)
+                        distance_squared = (
+                                (candidate_block[0] - current_block[0]) ** 2 +
+                                (candidate_block[1] - current_block[1]) ** 2 +
+                                (candidate_block[2] - current_block[2]) ** 2
+                        )
+                        if distance_squared < closest_distance:
+                            closest_distance = distance_squared
+                            closest_block = candidate_block
+
+                    # Add the closest block to the sorted group and remove it from remaining
+                    sorted_group.append(closest_block)
+                    remaining_blocks.remove(closest_block)
+                    # Update the current block to the one we just added
+                    current_block = closest_block
+
+                sorted_new_prot_coords.extend(sorted_group)
+
+            prot_coords.extend(sorted_new_prot_coords)
         return prot_coords
 
     def update_ressources(self):
@@ -194,7 +261,7 @@ class Bot(Thread):
             if distance < closest_distance:
                 closest_distance = distance
                 closest_villager = villager
-        return closest_villager.position[0], closest_villager.position[1]+1, closest_villager.position[2]
+        return floor(closest_villager.position[0])+0.5, floor(closest_villager.position[1])+1.2, floor(closest_villager.position[2])+0.5
 
     def buy(self, item_name: str = "wool", amount: int = 1):
 
@@ -207,10 +274,8 @@ class Bot(Thread):
         if screen_name is None or "Shop" not in screen_name:
             print("not in shop")
             distance_to_shop = math.sqrt((self.x - self.shop_pos[0]) ** 2 + (self.y - self.shop_pos[1]) ** 2 + (self.z - self.shop_pos[2]) ** 2)
-            if distance_to_shop > 2.2:
-                path = pathfinding.path_find((self.x, self.y, self.z), self.shop_pos, closest_if_fail=True)
-                print("found path")
-                pathfinding.path_walk_to(path=path)
+            if distance_to_shop > 2:
+                self.smart_move(*self.shop_pos)
                 print("path finded")
             look_at(*self.get_closest_villager())
             look(m.player_orientation()[0], 0)
@@ -236,7 +301,7 @@ class Bot(Thread):
                 time.sleep(0.15)
             minescript_plus.Screen.close_screen()
 
-    def place_protection(self, prot_layer=1):
+    def place_protection(self, prot_layer=3):
         for coord in self.bed_prot_pos[prot_layer]:
             place_block(coord, building_block=bed_layers_block[prot_layer])
             time.sleep(0.05)
@@ -307,9 +372,7 @@ class Bot(Thread):
 
 
     def move_to_generator(self):
-        c_x, c_y, c_z = m.player_position()
-        path = pathfinding.path_find((c_x, c_y, c_z), self.generator_pos, closest_if_fail=True)
-        pathfinding.path_walk_to(path=path, )
+        self.smart_move(*self.generator_pos)
         print("Done")
 
 
